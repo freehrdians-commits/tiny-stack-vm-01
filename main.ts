@@ -1,276 +1,93 @@
-// Tiny stack VM — interpreter for make.fun's tiny stack ISA v1.
+// Tiny stack VM: interpreter for make.fun's tiny stack ISA v1.
 // Reads /input/<id>/program.bin + input.bin, writes /output/<id>/stdout.bin
-// and /output/<id>/exit.txt for every instance id in the input directory.
-// Node 22, standard library only, deterministic: no clock, no network,
-// no environment-dependent behaviour.
+// and /output/<id>/exit.txt for every instance. Node 22, stdlib only,
+// deterministic: no clock, no network, no environment-dependent behaviour.
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-
-const IN_DIR = process.env.MAKEFUN_INPUT_DIR ?? '/input';
-const OUT_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
-
-const MAX_STEPS = 1_000_000;
-const MAX_STACK = 256;
-const MAX_CALLS = 64;
-const MAX_MEM = 256;
-const MAX_OUT = 65_536;
-
-// Trap exit codes from ISA.md.
-const TRAP_UNDERFLOW = 2;
-const TRAP_OVERFLOW = 3;
-const TRAP_DIV_ZERO = 4;
-const TRAP_BAD_OPCODE = 5;
-const TRAP_BAD_ADDR = 6;
-const TRAP_CALL_OVERFLOW = 7;
-const TRAP_EMPTY_CALL = 8;
-const TRAP_BAD_PC = 9;
-const TRAP_STEPS = 10;
-const TRAP_OUTPUT = 11;
-
-// Run one program. Returns { out: Buffer, exit: number }.
-function run(program, input) {
-  const mem = new Int32Array(MAX_MEM);
-  const stack = new Int32Array(MAX_STACK);
-  const calls = new Int32Array(MAX_CALLS);
-  let sp = 0; // number of values on the data stack
-  let cp = 0; // number of return addresses on the call stack
-  let pc = 0;
-  let steps = 0;
-  let inPos = 0;
-  const out = Buffer.alloc(MAX_OUT);
-  let outLen = 0;
-
-  // Write bytes into the output buffer. Returns false (trap 11) when the
-  // write would take the output past the limit; writes nothing in that case.
-  function emit(bytes, len) {
-    if (outLen + len > MAX_OUT) return false;
-    for (let i = 0; i < len; i++) out[outLen++] = bytes[i];
-    return true;
+const I = process.env.MAKEFUN_INPUT_DIR ?? '/input';
+const O = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+function run(p, q) {
+  const m = new Int32Array(256), s = new Int32Array(256), c = new Int32Array(64);
+  const pl = p.length;
+  let sp = 0, cp = 0, pc = 0, n = 0, ip = 0, ol = 0;
+  const o = Buffer.alloc(65536);
+  const T = e => { throw e };
+  const need = k => { if (sp < k) T(2) };
+  const push = v => { if (sp >= 256) T(3); s[sp++] = v | 0 };
+  const pop = () => { need(1); return s[--sp] };
+  try {
+    for (;;) {
+      if (n >= 1e6) T(10);
+      if (pc < 0 || pc >= pl) T(9);
+      const op = p[pc];
+      let L = 1, im = 0;
+      if (op === 1) { L = 2; im = p[pc + 1]; }
+      else if (op === 2) { L = 5; im = p[pc + 1] | p[pc + 2] << 8 | p[pc + 3] << 16 | p[pc + 4] << 24; }
+      else if (op >= 48 && op <= 51) { L = 3; im = p[pc + 1] | p[pc + 2] << 8; }
+      else if (!((op <= 7) || (op >= 16 && op <= 34) || op === 52 || (op >= 64 && op <= 65) || (op >= 80 && op <= 83))) T(5);
+      if (pc + L > pl) T(9);
+      n++;
+      const nx = pc + L;
+      pc = nx;
+      if (op === 0) return { out: o.subarray(0, ol), exit: 0 };
+      else if (op === 1) push((im << 24) >> 24);
+      else if (op === 2) push(im);
+      else if (op === 3) pop();
+      else if (op === 4) { need(1); push(s[sp - 1]); }
+      else if (op === 5) { need(2); const t = s[sp - 1]; s[sp - 1] = s[sp - 2]; s[sp - 2] = t; }
+      else if (op === 6) { need(2); push(s[sp - 2]); }
+      else if (op === 7) { need(3); const t = s[sp - 3]; s[sp - 3] = s[sp - 2]; s[sp - 2] = s[sp - 1]; s[sp - 1] = t; }
+      else if (op === 23) { need(1); s[sp - 1] = (-s[sp - 1]) | 0; }
+      else if (op === 27) { need(1); s[sp - 1] = ~s[sp - 1]; }
+      else if ((op >= 16 && op <= 22) || (op >= 24 && op <= 26) || (op >= 28 && op <= 30) || (op >= 32 && op <= 34)) {
+        need(2);
+        const b = s[--sp], a = s[sp - 1];
+        let r;
+        if (op === 16) r = (a + b) | 0;
+        else if (op === 17) r = (a - b) | 0;
+        else if (op === 18) r = Math.imul(a, b);
+        else if (op === 19) { if (!b) T(4); r = Math.trunc(a / b) | 0; }
+        else if (op === 20) { if (!b) T(4); r = (a % b) | 0; }
+        else if (op === 21) { if (!b) T(4); r = Math.trunc((a >>> 0) / (b >>> 0)) | 0; }
+        else if (op === 22) { if (!b) T(4); r = ((a >>> 0) % (b >>> 0)) | 0; }
+        else if (op === 24) r = a & b;
+        else if (op === 25) r = a | b;
+        else if (op === 26) r = a ^ b;
+        else if (op === 28) r = a << (b & 31);
+        else if (op === 29) r = a >> (b & 31);
+        else if (op === 30) r = (a >>> (b & 31)) | 0;
+        else if (op === 32) r = a === b ? 1 : 0;
+        else if (op === 33) r = a < b ? 1 : 0;
+        else r = (a >>> 0) < (b >>> 0) ? 1 : 0;
+        s[sp - 1] = r;
+      }
+      else if (op === 48) pc = nx + ((im << 16) >> 16);
+      else if (op === 49) { const v = pop(); if (v === 0) pc = nx + ((im << 16) >> 16); }
+      else if (op === 50) { const v = pop(); if (v !== 0) pc = nx + ((im << 16) >> 16); }
+      else if (op === 51) { if (cp >= 64) T(7); c[cp++] = nx; pc = im; }
+      else if (op === 52) { if (cp < 1) T(8); pc = c[--cp]; }
+      else if (op === 64) { need(1); const a = s[sp - 1]; if (a < 0 || a > 255) T(6); s[sp - 1] = m[a]; }
+      else if (op === 65) { need(2); const a = s[sp - 1], v = s[sp - 2]; if (a < 0 || a > 255) T(6); m[a] = v; sp -= 2; }
+      else if (op === 80) {
+        const v = pop(), t = String(v);
+        if (ol + t.length > 65536) T(11);
+        for (let i = 0; i < t.length; i++) o[ol++] = t.charCodeAt(i);
+      }
+      else if (op === 81) { const v = pop(); if (ol + 1 > 65536) T(11); o[ol++] = v & 255; }
+      else if (op === 82) push(ip < q.length ? q[ip++] : -1);
+      else if (op === 83) { const v = pop(); return { out: o.subarray(0, ol), exit: v & 255 }; }
+    }
+  } catch (e) {
+    return { out: o.subarray(0, ol), exit: e };
   }
-
-  // The exit code of the run: 0 for HALT, the trap code for a trap, or the
-  // EXIT operand's low byte.
-  let exit = 0;
-
-  for (;;) {
-    // Rule 1: step limit, checked before anything else each step.
-    if (steps >= MAX_STEPS) { exit = TRAP_STEPS; break; }
-    // Rule 2: pc must be inside the program.
-    if (pc < 0 || pc >= program.length) { exit = TRAP_BAD_PC; break; }
-    const op = program[pc];
-    // Instruction lengths and immediates, by opcode.
-    let len = 1;
-    let imm8 = 0;
-    let imm32 = 0;
-    let imm16 = 0;
-    switch (op) {
-      case 0x01: len = 2; break; // PUSH8
-      case 0x02: len = 5; break; // PUSH32
-      case 0x30: case 0x31: case 0x32: case 0x33: len = 3; break; // JMP JZ JNZ CALL
-      case 0x00: case 0x03: case 0x04: case 0x05: case 0x06: case 0x07:
-      case 0x10: case 0x11: case 0x12: case 0x13: case 0x14: case 0x15:
-      case 0x16: case 0x17: case 0x18: case 0x19: case 0x1a: case 0x1b:
-      case 0x1c: case 0x1d: case 0x1e: case 0x20: case 0x21: case 0x22:
-      case 0x34: case 0x40: case 0x41: case 0x50: case 0x51: case 0x52:
-      case 0x53:
-        len = 1; break;
-      default:
-        // Rule 3: a byte no opcode names.
-        exit = TRAP_BAD_OPCODE;
-        return { out: out.subarray(0, outLen), exit };
-    }
-    // Rule 4: the immediate must fit before the end of the program.
-    if (pc + len > program.length) { exit = TRAP_BAD_PC; break; }
-    if (len === 2) imm8 = program[pc + 1];
-    if (len === 5) {
-      imm32 = (program[pc + 1] | (program[pc + 2] << 8) | (program[pc + 3] << 16) | (program[pc + 4] << 24)) | 0;
-    }
-    if (len === 3) imm16 = program[pc + 1] | (program[pc + 2] << 8);
-
-    // The instruction executes now: it counts as one step.
-    steps++;
-    const next = pc + len;
-    pc = next;
-
-    switch (op) {
-      case 0x00: // HALT
-        return { out: out.subarray(0, outLen), exit: 0 };
-      case 0x01: { // PUSH8: signed 8-bit, sign-extended
-        if (sp >= MAX_STACK) { exit = TRAP_OVERFLOW; break; }
-        stack[sp++] = (imm8 << 24) >> 24;
-        break;
-      }
-      case 0x02: { // PUSH32: signed 32-bit little-endian
-        if (sp >= MAX_STACK) { exit = TRAP_OVERFLOW; break; }
-        stack[sp++] = imm32;
-        break;
-      }
-      case 0x03: { // POP
-        if (sp < 1) { exit = TRAP_UNDERFLOW; break; }
-        sp--;
-        break;
-      }
-      case 0x04: { // DUP
-        if (sp < 1) { exit = TRAP_UNDERFLOW; break; }
-        if (sp >= MAX_STACK) { exit = TRAP_OVERFLOW; break; }
-        stack[sp] = stack[sp - 1];
-        sp++;
-        break;
-      }
-      case 0x05: { // SWAP
-        if (sp < 2) { exit = TRAP_UNDERFLOW; break; }
-        const t = stack[sp - 1];
-        stack[sp - 1] = stack[sp - 2];
-        stack[sp - 2] = t;
-        break;
-      }
-      case 0x06: { // OVER
-        if (sp < 2) { exit = TRAP_UNDERFLOW; break; }
-        if (sp >= MAX_STACK) { exit = TRAP_OVERFLOW; break; }
-        stack[sp] = stack[sp - 2];
-        sp++;
-        break;
-      }
-      case 0x07: { // ROT: (a b c -- b c a)
-        if (sp < 3) { exit = TRAP_UNDERFLOW; break; }
-        const a = stack[sp - 3];
-        stack[sp - 3] = stack[sp - 2];
-        stack[sp - 2] = stack[sp - 1];
-        stack[sp - 1] = a;
-        break;
-      }
-      case 0x10: case 0x11: case 0x12: case 0x13: case 0x14:
-      case 0x15: case 0x16: case 0x18: case 0x19: case 0x1a:
-      case 0x1c: case 0x1d: case 0x1e: case 0x20: case 0x21: case 0x22: {
-        // Binary operators: (a b -- r), b is the top.
-        if (sp < 2) { exit = TRAP_UNDERFLOW; break; }
-        const b = stack[sp - 1];
-        const a = stack[sp - 2];
-        let r = 0;
-        if (op === 0x10) r = (a + b) | 0; // ADD, wraps
-        else if (op === 0x11) r = (a - b) | 0; // SUB, wraps
-        else if (op === 0x12) r = Math.imul(a, b); // MUL, low 32 bits
-        else if (op === 0x13) { // DIV, signed, toward zero
-          if (b === 0) { exit = TRAP_DIV_ZERO; break; }
-          r = (Math.trunc(a / b)) | 0; // INT_MIN / -1 wraps to INT_MIN
-        } else if (op === 0x14) { // MOD, sign of a
-          if (b === 0) { exit = TRAP_DIV_ZERO; break; }
-          r = (a % b) | 0; // x % -1 is 0
-        } else if (op === 0x15) { // DIVU, unsigned
-          if (b === 0) { exit = TRAP_DIV_ZERO; break; }
-          r = (Math.trunc((a >>> 0) / (b >>> 0))) | 0;
-        } else if (op === 0x16) { // MODU, unsigned
-          if (b === 0) { exit = TRAP_DIV_ZERO; break; }
-          r = ((a >>> 0) % (b >>> 0)) | 0;
-        } else if (op === 0x18) r = a & b; // AND
-        else if (op === 0x19) r = a | b; // OR
-        else if (op === 0x1a) r = a ^ b; // XOR
-        else if (op === 0x1c) r = a << (b & 31); // SHL
-        else if (op === 0x1d) r = a >> (b & 31); // SHR, arithmetic
-        else if (op === 0x1e) r = (a >>> (b & 31)) | 0; // SHRU, logical
-        else if (op === 0x20) r = a === b ? 1 : 0; // EQ
-        else if (op === 0x21) r = a < b ? 1 : 0; // LT, signed
-        else r = (a >>> 0) < (b >>> 0) ? 1 : 0; // LTU, unsigned
-        sp--;
-        stack[sp - 1] = r;
-        break;
-      }
-      case 0x17: { // NEG, wraps: -(INT_MIN) is INT_MIN
-        if (sp < 1) { exit = TRAP_UNDERFLOW; break; }
-        stack[sp - 1] = (-stack[sp - 1]) | 0;
-        break;
-      }
-      case 0x1b: { // NOT
-        if (sp < 1) { exit = TRAP_UNDERFLOW; break; }
-        stack[sp - 1] = ~stack[sp - 1];
-        break;
-      }
-      case 0x30: { // JMP: pc = next + signed offset
-        const off = (imm16 << 16) >> 16;
-        pc = next + off;
-        break;
-      }
-      case 0x31: { // JZ
-        if (sp < 1) { exit = TRAP_UNDERFLOW; break; }
-        const v = stack[--sp];
-        if (v === 0) pc = next + ((imm16 << 16) >> 16);
-        break;
-      }
-      case 0x32: { // JNZ
-        if (sp < 1) { exit = TRAP_UNDERFLOW; break; }
-        const v = stack[--sp];
-        if (v !== 0) pc = next + ((imm16 << 16) >> 16);
-        break;
-      }
-      case 0x33: { // CALL: unsigned target, push return address
-        if (cp >= MAX_CALLS) { exit = TRAP_CALL_OVERFLOW; break; }
-        calls[cp++] = next;
-        pc = imm16;
-        break;
-      }
-      case 0x34: { // RET
-        if (cp < 1) { exit = TRAP_EMPTY_CALL; break; }
-        pc = calls[--cp];
-        break;
-      }
-      case 0x40: { // LOAD
-        if (sp < 1) { exit = TRAP_UNDERFLOW; break; }
-        const addr = stack[sp - 1];
-        if (addr < 0 || addr > 255) { exit = TRAP_BAD_ADDR; break; }
-        stack[sp - 1] = mem[addr];
-        break;
-      }
-      case 0x41: { // STORE: (v addr --)
-        if (sp < 2) { exit = TRAP_UNDERFLOW; break; }
-        const addr = stack[sp - 1];
-        const v = stack[sp - 2];
-        if (addr < 0 || addr > 255) { exit = TRAP_BAD_ADDR; break; }
-        mem[addr] = v;
-        sp -= 2;
-        break;
-      }
-      case 0x50: { // PRINT: decimal ASCII, no newline
-        if (sp < 1) { exit = TRAP_UNDERFLOW; break; }
-        const v = stack[--sp];
-        const s = String(v);
-        // Write the decimal digits straight into the output buffer instead
-        // of allocating a throwaway Buffer per PRINT.
-        if (outLen + s.length > MAX_OUT) { exit = TRAP_OUTPUT; break; }
-        for (let i = 0; i < s.length; i++) out[outLen++] = s.charCodeAt(i);
-        break;
-      }
-      case 0x51: { // PUTC: one byte, v AND 255
-        if (sp < 1) { exit = TRAP_UNDERFLOW; break; }
-        const v = stack[--sp];
-        if (!emit([v & 255], 1)) { exit = TRAP_OUTPUT; break; }
-        break;
-      }
-      case 0x52: { // IN: next input byte, or -1 when used up
-        if (sp >= MAX_STACK) { exit = TRAP_OVERFLOW; break; }
-        stack[sp++] = inPos < input.length ? input[inPos++] : -1;
-        break;
-      }
-      case 0x53: { // EXIT: code v AND 255
-        if (sp < 1) { exit = TRAP_UNDERFLOW; break; }
-        const v = stack[--sp];
-        return { out: out.subarray(0, outLen), exit: v & 255 };
-      }
-    }
-    // A trap set `exit` inside the switch: stop at once, keeping the
-    // output written before the trapping instruction. (HALT returns
-    // directly above, so reaching here with exit !== 0 always means a trap.)
-    if (exit !== 0) break;
-  }
-  return { out: out.subarray(0, outLen), exit };
 }
-
-for (const id of readdirSync(IN_DIR).sort()) {
-  const dir = join(IN_DIR, id);
-  const program = readFileSync(join(dir, 'program.bin'));
-  const input = existsSync(join(dir, 'input.bin')) ? readFileSync(join(dir, 'input.bin')) : Buffer.alloc(0);
-  const { out, exit } = run(program, input);
-  const outDir = join(OUT_DIR, id);
-  mkdirSync(outDir, { recursive: true });
-  writeFileSync(join(outDir, 'stdout.bin'), out);
-  writeFileSync(join(outDir, 'exit.txt'), String(exit) + '\n');
+for (const id of readdirSync(I).sort()) {
+  const d = join(I, id);
+  const p = readFileSync(join(d, 'program.bin'));
+  const q = existsSync(join(d, 'input.bin')) ? readFileSync(join(d, 'input.bin')) : Buffer.alloc(0);
+  const r = run(p, q);
+  const od = join(O, id);
+  mkdirSync(od, { recursive: true });
+  writeFileSync(join(od, 'stdout.bin'), r.out);
+  writeFileSync(join(od, 'exit.txt'), String(r.exit) + '\n');
 }
